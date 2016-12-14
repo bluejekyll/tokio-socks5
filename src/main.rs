@@ -57,7 +57,7 @@ use std::net::Shutdown;
 use std::str;
 use std::time::Duration;
 
-use futures::{Future, Poll, Async};
+use futures::{future, Future, Poll, Async};
 use futures::stream::Stream;
 use tokio_core::reactor::{Core, Handle, Timeout};
 use tokio_core::net::{TcpStream, TcpListener};
@@ -243,8 +243,9 @@ impl Client {
         //
         // Depending on the address type, we then delegate to different futures
         // to implement that particular address format.
-	let handle = self.handle.clone();
-	let dns = self.dns.clone();
+        let handle = self.handle.clone();
+        let dns = self.dns.clone();
+
         let resv = command.and_then(|c| read_exact(c, [0u8]).map(|c| c.0));
         let atyp = resv.and_then(|c| read_exact(c, [0u8]));
         let addr = mybox(atyp.and_then(|(c, buf)| {
@@ -311,15 +312,23 @@ impl Client {
                 v5::ATYP_DOMAIN => {
                     mybox(read_exact(c, [0u8]).and_then(|(conn, buf)| {
                         read_exact(conn, vec![0u8; buf[0] as usize + 2])
-                    }).and_then(move |(conn, buf)| {
-			let (name, port) = try!(name_port(&buf));
-			let (stream, sender) = UdpClientStream::new(*dns.clone(), handle.clone());
-			let client = ClientFuture::new(stream, sender, handle.clone(), None);
-			let query = client.query(name, DNSClass::IN, RecordType::A).map(move |response| {
-			    get_addr(response, port)
-			});
-			Ok((conn, *dns))
-                    }))
+                    }).map(move |(conn, buf)| {
+                        let (name, port) = name_port(&buf).unwrap(); // <-- FIXME: bad unwrap!
+                        let (stream, sender) = UdpClientStream::new(*dns.clone(), handle.clone());
+                        let client = ClientFuture::new(stream, sender, handle.clone(), None);
+                        let result: Box<Future<Item=(TcpStream, SocketAddr), Error=io::Error>> =
+                          mybox(client.query(name, DNSClass::IN, RecordType::A)
+                               .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("dns error: {}", e)))
+                               .map(move |response| {
+                                   let addr = get_addr(response, port).unwrap(); // <-- FIXME: bad unwrap!
+                                   (conn, addr)
+                               })
+                           );
+
+                        // mybox(future::ok((conn, *dns)));
+                        result
+                    }).flatten()
+                )
                 }
                 n => {
                     let msg = format!("unknown ATYP received: {}", n);
